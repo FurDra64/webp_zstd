@@ -2,7 +2,7 @@
 self.postMessage({ type: 'log', msg: 'Worker top-level execution' });
 
 try {
-    importScripts('https://cdn.jsdelivr.net/npm/fzstd@0.1.1/dist/index.min.js');
+    importScripts('https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.min.js');
     self.postMessage({ type: 'log', msg: 'fzstd library loaded successfully' });
 } catch (e) {
     self.postMessage({ type: 'log', msg: 'CRITICAL: fzstd load failed: ' + e.message });
