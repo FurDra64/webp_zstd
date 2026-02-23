@@ -1,209 +1,139 @@
-const dropZone = document.getElementById('drop-zone');
-const fileInput = document.getElementById('file-input');
-const fileList = document.getElementById('file-list');
-const fileListContainer = document.getElementById('file-list-container');
-const fileCount = document.getElementById('file-count');
-const clearBtn = document.getElementById('clear-btn');
-const convertBtn = document.getElementById('convert-btn');
-const progressContainer = document.getElementById('progress-container');
-const progressFill = document.getElementById('progress-fill');
-const progressPercent = document.getElementById('progress-percent');
-const statusText = document.getElementById('status-text');
+/* Legacy-Compatible JS (ES5/ES6 simple) */
+(function () {
+    var dropZone = document.getElementById('drop-zone');
+    var fileInput = document.getElementById('file-input');
+    var fileList = document.getElementById('file-list');
+    var fileListContainer = document.getElementById('file-list-container');
+    var clearBtn = document.getElementById('clear-btn');
+    var convertBtn = document.getElementById('convert-btn');
+    var progressContainer = document.getElementById('progress-container');
+    var progressFill = document.getElementById('progress-fill');
+    var statusText = document.getElementById('status-text');
+    var debugLog = document.getElementById('debug-log');
 
-let filesArray = [];
-let worker = null;
-let currentFileIndex = 0;
+    var filesArray = [];
+    var currentFileIndex = 0;
+    var worker = null;
 
-// Debug Log
-const debugConsole = document.getElementById('debug-console');
-const debugLogArea = document.getElementById('debug-log');
-
-function log(msg) {
-    console.log(msg);
-    const div = document.createElement('div');
-    div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-    debugLogArea.appendChild(div);
-    debugLogArea.scrollTop = debugLogArea.scrollHeight;
-}
-
-// Global error handler
-window.onerror = (msg, url, line) => log(`ERR: ${msg} (${line})`);
-window.onunhandledrejection = (e) => log(`REJECT: ${e.reason}`);
-
-// Create debug toggle logic (now console is visible by default)
-debugConsole.classList.remove('hidden');
-log("App Initialized");
-checkFeatures();
-
-async function checkFeatures() {
-    log(`UserAgent: ${navigator.userAgent}`);
-    log(`OffscreenCanvas: ${typeof OffscreenCanvas !== 'undefined'}`);
-    if (typeof OffscreenCanvas !== 'undefined') {
-        try {
-            const canvas = new OffscreenCanvas(1, 1);
-            log(`OC.convertToBlob: ${typeof canvas.convertToBlob === 'function'}`);
-            const webpTest = await canvas.convertToBlob({ type: 'image/webp' }).catch(() => null);
-            log(`WebP Encoding Support: ${webpTest?.type === 'image/webp'}`);
-        } catch (e) {
-            log(`OC Test Error: ${e.message}`);
-        }
+    function log(msg) {
+        console.log(msg);
+        var div = document.createElement('div');
+        div.textContent = "[" + new Date().toLocaleTimeString() + "] " + msg;
+        debugLog.appendChild(div);
+        debugLog.scrollTop = debugLog.scrollHeight;
     }
-}
 
-// Initialize Web Worker
-function initWorker() {
-    if (worker) worker.terminate();
-    worker = new Worker('worker.js');
+    log("Initial Check...");
+    log("UserAgent: " + navigator.userAgent);
 
-    worker.onmessage = (e) => {
-        const { type, progress, result, error, filename } = e.data;
+    var hasWorker = typeof Worker !== 'undefined';
+    var hasOffscreen = typeof OffscreenCanvas !== 'undefined';
+    log("Worker Support: " + hasWorker);
+    log("OffscreenCanvas Support: " + hasOffscreen);
 
-        if (type === 'progress') {
-            progressFill.style.width = `${progress}%`;
-            progressPercent.textContent = `${Math.round(progress)}%`;
-            statusText.textContent = filename ? `Converting: ${filename}` : 'Processing...';
-        } else if (type === 'log') {
-            log(`Worker: ${e.data.msg}`);
-        } else if (type === 'request-next') {
-            sendNextFile();
-        } else if (type === 'done') {
-            handleComplete(result);
-        } else if (type === 'error') {
-            handleError(error);
-        }
+    dropZone.onclick = function () { fileInput.click(); };
+    fileInput.onchange = function (e) {
+        addFiles(e.target.files);
+        fileInput.value = '';
     };
-}
 
-// UI Event Listeners
-dropZone.onclick = () => fileInput.click();
-
-fileInput.onchange = (e) => {
-    addFiles(Array.from(e.target.files));
-    fileInput.value = '';
-};
-
-dropZone.ondragover = (e) => {
-    e.preventDefault();
-    dropZone.classList.add('dragover');
-};
-
-dropZone.ondragleave = () => {
-    dropZone.classList.remove('dragover');
-};
-
-dropZone.ondrop = (e) => {
-    e.preventDefault();
-    dropZone.classList.remove('dragover');
-    addFiles(Array.from(e.dataTransfer.files));
-};
-
-clearBtn.onclick = () => {
-    filesArray = [];
-    updateUI();
-};
-
-convertBtn.onclick = () => {
-    startConversion();
-};
-
-function addFiles(newFiles) {
-    const images = newFiles.filter(f => f.type.startsWith('image/'));
-    filesArray = [...filesArray, ...images];
-    updateUI();
-}
-
-function updateUI() {
-    fileList.innerHTML = '';
-
-    // Performance: Don't render too many items if they crash the DOM
-    const displayLimit = 100;
-    const toShow = filesArray.slice(0, displayLimit);
-
-    toShow.forEach(file => {
-        const li = document.createElement('li');
-        li.innerHTML = `
-            <span class="file-name">${file.name}</span>
-            <span class="file-size">${formatBytes(file.size)}</span>
-        `;
-        fileList.appendChild(li);
-    });
-
-    if (filesArray.length > displayLimit) {
-        const li = document.createElement('li');
-        li.textContent = `... and ${filesArray.length - displayLimit} more files`;
-        li.style.color = 'var(--text-muted)';
-        li.style.justifyContent = 'center';
-        fileList.appendChild(li);
+    function addFiles(files) {
+        for (var i = 0; i < files.length; i++) {
+            if (files[i].type.indexOf('image/') === 0) {
+                filesArray.push(files[i]);
+            }
+        }
+        updateUI();
     }
 
-    if (filesArray.length > 0) {
-        fileListContainer.classList.remove('hidden');
-        convertBtn.disabled = false;
-        fileCount.textContent = `${filesArray.length} file${filesArray.length > 1 ? 's' : ''}`;
-    } else {
-        fileListContainer.classList.add('hidden');
+    function updateUI() {
+        fileList.innerHTML = '';
+        for (var i = 0; i < Math.min(filesArray.length, 50); i++) {
+            var li = document.createElement('li');
+            li.textContent = filesArray[i].name + " (" + Math.round(filesArray[i].size / 1024) + " KB)";
+            fileList.appendChild(li);
+        }
+        if (filesArray.length > 50) {
+            var li = document.createElement('li');
+            li.textContent = "...他 " + (filesArray.length - 50) + " 件";
+            fileList.appendChild(li);
+        }
+        fileListContainer.className = filesArray.length > 0 ? '' : 'hidden';
+        convertBtn.disabled = filesArray.length === 0;
+    }
+
+    clearBtn.onclick = function () {
+        filesArray = [];
+        updateUI();
+    };
+
+    convertBtn.onclick = function () {
+        startProcessing();
+    };
+
+    function startProcessing() {
+        log("Process Start. Files: " + filesArray.length);
         convertBtn.disabled = true;
+        progressContainer.className = '';
+        currentFileIndex = 0;
+
+        if (hasWorker) {
+            startWorkerMode();
+        } else {
+            log("No Worker support. Falling back to Main Thread (UI may freeze)");
+            startMainThreadMode();
+        }
     }
 
-    progressContainer.classList.add('hidden');
-}
+    function startWorkerMode() {
+        if (worker) worker.terminate();
+        worker = new Worker('worker.js');
 
-async function startConversion() {
-    if (filesArray.length === 0) return;
+        worker.onmessage = function (e) {
+            var d = e.data;
+            if (d.type === 'log') log("Worker: " + d.msg);
+            else if (d.type === 'progress') {
+                progressFill.style.width = d.progress + "%";
+                statusText.textContent = d.filename || "処理中...";
+            }
+            else if (d.type === 'request-next') {
+                if (currentFileIndex < filesArray.length) {
+                    worker.postMessage({ type: 'process-file', file: filesArray[currentFileIndex], index: currentFileIndex });
+                    currentFileIndex++;
+                } else {
+                    worker.postMessage({ type: 'finalize' });
+                }
+            }
+            else if (d.type === 'done') finish(d.result);
+            else if (d.type === 'error') {
+                log("Worker Error: " + d.error);
+                convertBtn.disabled = false;
+            }
+        };
 
-    initWorker();
-    currentFileIndex = 0;
-
-    convertBtn.disabled = true;
-    progressContainer.classList.remove('hidden');
-    progressFill.style.width = '0%';
-    progressPercent.textContent = '0%';
-    statusText.textContent = 'Initializing...';
-
-    // Start communication
-    worker.postMessage({ type: 'start', total: filesArray.length });
-}
-
-function sendNextFile() {
-    if (currentFileIndex < filesArray.length) {
-        const file = filesArray[currentFileIndex];
-        // Send one file at a time. This avoids massive message cloning overhead.
-        worker.postMessage({ type: 'process-file', file: file, index: currentFileIndex });
-        currentFileIndex++;
-    } else {
-        worker.postMessage({ type: 'finalize' });
+        worker.postMessage({ type: 'start', total: filesArray.length });
     }
-}
 
-function handleComplete(blob) {
-    statusText.textContent = 'Complete!';
-    progressFill.style.background = 'var(--success)';
-
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `images_${new Date().getTime()}.tar.zst`;
-    document.body.appendChild(a);
-    a.click();
-
-    // Cleanup URL immediately after download click
-    setTimeout(() => {
-        URL.revokeObjectURL(url);
-        document.body.removeChild(a);
+    // Placeholder for Main Thread Mode if needed in future
+    function startMainThreadMode() {
+        log("Main Thread Processing not yet fully implemented for Zstd. Please use a modern browser.");
+        alert("Worker非対応ブラウザです。");
         convertBtn.disabled = false;
-    }, 2000);
-}
+    }
 
-function handleError(err) {
-    console.error(err);
-    statusText.textContent = `Error: ${err}`;
-    convertBtn.disabled = false;
-}
-
-function formatBytes(bytes) {
-    if (bytes === 0) return '0 Bytes';
-    const k = 1024;
-    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
+    function finish(blob) {
+        log("Done! Downloading...");
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = "images_" + (+new Date()) + ".tar.zst";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () {
+            URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            convertBtn.disabled = false;
+            statusText.textContent = "完了";
+        }, 1000);
+    }
+})();
