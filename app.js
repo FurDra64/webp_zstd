@@ -69,26 +69,40 @@
     };
 
     convertBtn.onclick = function () {
-        startProcessing();
+        startProcessing(false);
     };
 
-    function startProcessing() {
-        log("Process Start. Files: " + filesArray.length);
+    forceMainBtn.onclick = function (e) {
+        e.preventDefault();
+        startProcessing(true);
+    };
+
+    function startProcessing(forceMain) {
+        log("Process Start. Files: " + filesArray.length + (forceMain ? " (MainThread)" : " (Worker)"));
         convertBtn.disabled = true;
         progressContainer.className = '';
         currentFileIndex = 0;
 
-        if (hasWorker) {
+        if (hasWorker && !forceMain) {
             startWorkerMode();
         } else {
-            log("No Worker support. Falling back to Main Thread (UI may freeze)");
+            log("Mode: Main Thread (Process started)");
             startMainThreadMode();
         }
     }
 
     function startWorkerMode() {
         if (worker) worker.terminate();
-        worker = new Worker('worker.js');
+        try {
+            worker = new Worker('worker.js');
+            worker.onerror = function (e) {
+                log("Worker Error: " + e.message);
+            };
+        } catch (e) {
+            log("Worker Creation failed: " + e.message);
+            startMainThreadMode();
+            return;
+        }
 
         worker.onmessage = function (e) {
             var d = e.data;
@@ -107,7 +121,7 @@
             }
             else if (d.type === 'done') finish(d.result);
             else if (d.type === 'error') {
-                log("Worker Error: " + d.error);
+                log("Worker Logic Error: " + d.error);
                 convertBtn.disabled = false;
             }
         };
@@ -115,7 +129,6 @@
         worker.postMessage({ type: 'start', total: filesArray.length });
     }
 
-    // Simplified Main Thread Mode using invisible canvas
     function startMainThreadMode() {
         var tarEntries = [];
         var canvas = document.createElement('canvas');
@@ -135,25 +148,37 @@
             reader.onload = function (e) {
                 var img = new Image();
                 img.onload = function () {
+                    log("Main: Image loaded " + img.width + "x" + img.height);
                     canvas.width = img.width;
                     canvas.height = img.height;
                     canvas.getContext('2d').drawImage(img, 0, 0);
 
                     try {
                         var webpDataUrl = canvas.toDataURL('image/webp', 0.8);
-                        var binary = atob(webpDataUrl.split(',')[1]);
+                        if (webpDataUrl.indexOf('data:image/webp') !== 0) {
+                            log("Main: WebP non-supported by canvas, falling back to data:image/png");
+                            webpDataUrl = canvas.toDataURL('image/png');
+                        }
+
+                        var parts = webpDataUrl.split(',');
+                        var binary = atob(parts[1]);
                         var array = new Uint8Array(binary.length);
                         for (var i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
 
-                        var webpName = file.name.replace(/\.[^/.]+$/, "") + ".webp";
-                        tarEntries.push({ name: webpName, data: array });
+                        var ext = webpDataUrl.indexOf('webp') !== -1 ? ".webp" : ".png";
+                        var newName = file.name.replace(/\.[^/.]+$/, "") + ext;
+
+                        tarEntries.push({ name: newName, data: array });
+                        log("Main: Done " + newName + " (" + array.length + " bytes)");
 
                         currentFileIndex++;
-                        setTimeout(processNext, 10);
+                        setTimeout(processNext, 50);
                     } catch (err) {
                         log("Main Error: " + err.message);
+                        convertBtn.disabled = false;
                     }
                 };
+                img.onerror = function () { log("Main: Image Load Error"); };
                 img.src = e.target.result;
             };
             reader.readAsDataURL(file);
@@ -177,17 +202,30 @@
             var sz = ent.data.length.toString(8);
             while (sz.length < 11) sz = "0" + sz;
             for (var j = 0; j < 11; j++) h[124 + j] = sz.charCodeAt(j);
-            h[156] = 48;
+            h[156] = 48; // File type 0
+
+            // Magic
+            var magic = "ustar\u000000";
+            for (var j = 0; j < 8; j++) h[257 + j] = magic.charCodeAt(j);
+
             var chk = 0; for (var j = 0; j < 512; j++) chk += (j >= 148 && j < 156) ? 32 : h[j];
             var chkS = chk.toString(8); while (chkS.length < 6) chkS = "0" + chkS;
             for (var j = 0; j < 6; j++) h[148 + j] = chkS.charCodeAt(j);
+            h[154] = 0; h[155] = 32;
+
             buffer.set(h, offset); offset += 512;
             buffer.set(ent.data, offset); offset += Math.ceil(ent.data.length / 512) * 512;
         }
 
-        log("Main: Zstd Compress...");
-        var compressed = fzstd.compress(buffer);
-        finish(new Blob([compressed], { type: 'application/zstd' }));
+        log("Main: Zstd Compress start...");
+        try {
+            var compressed = fzstd.compress(buffer);
+            log("Main: Compress done (" + compressed.length + " bytes)");
+            finish(new Blob([compressed], { type: 'application/zstd' }));
+        } catch (e) {
+            log("Main: Compress Error: " + e.message);
+            convertBtn.disabled = false;
+        }
     }
 
     function finish(blob) {
