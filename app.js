@@ -6,6 +6,7 @@
     var fileListContainer = document.getElementById('file-list-container');
     var clearBtn = document.getElementById('clear-btn');
     var convertBtn = document.getElementById('convert-btn');
+    var forceMainBtn = document.getElementById('force-main-btn');
     var progressContainer = document.getElementById('progress-container');
     var progressFill = document.getElementById('progress-fill');
     var statusText = document.getElementById('status-text');
@@ -114,11 +115,79 @@
         worker.postMessage({ type: 'start', total: filesArray.length });
     }
 
-    // Placeholder for Main Thread Mode if needed in future
+    // Simplified Main Thread Mode using invisible canvas
     function startMainThreadMode() {
-        log("Main Thread Processing not yet fully implemented for Zstd. Please use a modern browser.");
-        alert("Worker非対応ブラウザです。");
-        convertBtn.disabled = false;
+        var tarEntries = [];
+        var canvas = document.createElement('canvas');
+
+        function processNext() {
+            if (currentFileIndex >= filesArray.length) {
+                finalizeMain(tarEntries);
+                return;
+            }
+
+            var file = filesArray[currentFileIndex];
+            log("Main: Processing " + file.name);
+            statusText.textContent = file.name;
+            progressFill.style.width = Math.floor((currentFileIndex / filesArray.length) * 80) + "%";
+
+            var reader = new FileReader();
+            reader.onload = function (e) {
+                var img = new Image();
+                img.onload = function () {
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    canvas.getContext('2d').drawImage(img, 0, 0);
+
+                    try {
+                        var webpDataUrl = canvas.toDataURL('image/webp', 0.8);
+                        var binary = atob(webpDataUrl.split(',')[1]);
+                        var array = new Uint8Array(binary.length);
+                        for (var i = 0; i < binary.length; i++) array[i] = binary.charCodeAt(i);
+
+                        var webpName = file.name.replace(/\.[^/.]+$/, "") + ".webp";
+                        tarEntries.push({ name: webpName, data: array });
+
+                        currentFileIndex++;
+                        setTimeout(processNext, 10);
+                    } catch (err) {
+                        log("Main Error: " + err.message);
+                    }
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        processNext();
+    }
+
+    function finalizeMain(entries) {
+        log("Main: Building TAR...");
+        var totalSize = 0;
+        for (var i = 0; i < entries.length; i++) totalSize += 512 + (Math.ceil(entries[i].data.length / 512) * 512);
+        totalSize += 1024;
+
+        var buffer = new Uint8Array(totalSize);
+        var offset = 0;
+        for (var i = 0; i < entries.length; i++) {
+            var ent = entries[i];
+            var h = new Uint8Array(512);
+            for (var j = 0; j < Math.min(ent.name.length, 99); j++) h[j] = ent.name.charCodeAt(j);
+            var sz = ent.data.length.toString(8);
+            while (sz.length < 11) sz = "0" + sz;
+            for (var j = 0; j < 11; j++) h[124 + j] = sz.charCodeAt(j);
+            h[156] = 48;
+            var chk = 0; for (var j = 0; j < 512; j++) chk += (j >= 148 && j < 156) ? 32 : h[j];
+            var chkS = chk.toString(8); while (chkS.length < 6) chkS = "0" + chkS;
+            for (var j = 0; j < 6; j++) h[148 + j] = chkS.charCodeAt(j);
+            buffer.set(h, offset); offset += 512;
+            buffer.set(ent.data, offset); offset += Math.ceil(ent.data.length / 512) * 512;
+        }
+
+        log("Main: Zstd Compress...");
+        var compressed = fzstd.compress(buffer);
+        finish(new Blob([compressed], { type: 'application/zstd' }));
     }
 
     function finish(blob) {
