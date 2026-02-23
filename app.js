@@ -17,10 +17,10 @@ let worker = null;
 function initWorker() {
     if (worker) worker.terminate();
     worker = new Worker('worker.js');
-    
+
     worker.onmessage = (e) => {
         const { type, progress, result, error, filename } = e.data;
-        
+
         if (type === 'progress') {
             progressFill.style.width = `${progress}%`;
             progressPercent.textContent = `${Math.round(progress)}%`;
@@ -90,7 +90,7 @@ function updateUI() {
         fileListContainer.classList.add('hidden');
         convertBtn.disabled = true;
     }
-    
+
     progressContainer.classList.add('hidden');
 }
 
@@ -98,27 +98,22 @@ async function startConversion() {
     if (filesArray.length === 0) return;
 
     initWorker();
-    
+
     convertBtn.disabled = true;
     progressContainer.classList.remove('hidden');
     progressFill.style.width = '0%';
     progressPercent.textContent = '0%';
     statusText.textContent = 'Starting...';
 
-    // Send files to worker
-    // We need to read them as ArrayBuffers first or pass Blobs
-    const fileData = await Promise.all(filesArray.map(async file => {
-        const buffer = await file.arrayBuffer();
-        return { name: file.name, data: buffer, type: file.type };
-    }));
-
-    worker.postMessage({ type: 'start', files: fileData });
+    // Send File objects directly (they are Blobs and transferable/cloneable)
+    // This avoids loading all 1GB into memory in the main thread.
+    worker.postMessage({ type: 'start', files: filesArray });
 }
 
 function handleComplete(blob) {
     statusText.textContent = 'Complete!';
     progressFill.style.background = 'var(--success)';
-    
+
     // Download the result
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -127,7 +122,7 @@ function handleComplete(blob) {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    
+
     setTimeout(() => {
         convertBtn.disabled = false;
     }, 2000);
