@@ -1,124 +1,204 @@
-// Import fzstd from CDN inside worker
-importScripts('https://cdn.jsdelivr.net/npm/fzstd@0.1.1/dist/index.min.js');
+// Import fzstd
+try {
+    importScripts('https://cdn.jsdelivr.net/npm/fzstd@0.1.1/dist/index.min.js');
+} catch (e) {
+    self.postMessage({ type: 'error', error: 'Failed to load fzstd library: ' + e.message });
+}
+
+function log(msg) {
+    self.postMessage({ type: 'log', msg });
+}
+
+let totalFiles = 0;
+let db = null;
+const DB_NAME = 'WebPConverterDB';
+const STORE_NAME = 'blobs';
+
+// Initialize IndexedDB
+async function initDB() {
+    log("initDB start");
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, 1);
+        request.onupgradeneeded = (e) => {
+            log("DB Upgrade needed");
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME);
+            }
+        };
+        request.onsuccess = (e) => {
+            log("DB Open success");
+            db = e.target.result;
+            const transaction = db.transaction(STORE_NAME, 'readwrite');
+            transaction.objectStore(STORE_NAME).clear();
+            resolve();
+        };
+        request.onerror = (e) => {
+            log("DB Open error: " + e.target.error);
+            reject(e.target.error);
+        };
+    });
+}
+
+async function saveToDB(index, data) {
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, 'readwrite');
+        const request = transaction.objectStore(STORE_NAME).put(data, index);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function getFromDB(index) {
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, 'readonly');
+        const request = transaction.objectStore(STORE_NAME).get(index);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+let fileMetadata = [];
 
 self.onmessage = async (e) => {
-    const { type, files } = e.data;
-    if (type === 'start') {
-        try {
-            const result = await processFiles(files);
-            self.postMessage({ type: 'done', result });
-        } catch (err) {
-            console.error(err);
-            self.postMessage({ type: 'error', error: err.message });
+    const { type, total, file, index } = e.data;
+
+    try {
+        if (type === 'start') {
+            log(`Start message received. Total: ${total}`);
+            totalFiles = total;
+            fileMetadata = [];
+            await initDB();
+            log("Worker ready, requesting first file");
+            self.postMessage({ type: 'request-next' });
         }
+        else if (type === 'process-file') {
+            log(`Processing file ${index}: ${file.name}`);
+            self.postMessage({
+                type: 'progress',
+                progress: (index / totalFiles) * 80,
+                filename: file.name
+            });
+
+            const { name, data } = await processOne(file);
+            await saveToDB(index, data);
+            fileMetadata.push({ name, size: data.length });
+
+            log(`Saved ${name} to DB. Requesting next.`);
+            self.postMessage({ type: 'request-next' });
+        }
+        else if (type === 'finalize') {
+            log("Finalizing archive...");
+            await finalize();
+        }
+    } catch (err) {
+        log(`CRITICAL ERROR: ${err.message}`);
+        self.postMessage({ type: 'error', error: err.message });
     }
 };
 
-async function processFiles(files) {
-    const tarEntries = [];
-    let totalFiles = files.length;
-
-    for (let i = 0; i < totalFiles; i++) {
-        const file = files[i];
-        self.postMessage({
-            type: 'progress',
-            progress: (i / totalFiles) * 85,
-            filename: file.name
-        });
-
-        // 1. Convert to WebP (processes one at a time to save memory)
-        const webpData = await convertToWebP(file);
-
-        // 2. Add to TAR list
-        const webpName = file.name.replace(/\.[^/.]+$/, "") + ".webp";
-        tarEntries.push({
-            name: webpName,
-            data: webpData
-        });
-
-        // Minor delay to allow GC a chance to breathe in some environments
-        if (i % 10 === 0) await new Promise(r => setTimeout(r, 0));
+async function processOne(file) {
+    log(`createImageBitmap start: ${file.name}`);
+    let imgBitmap;
+    try {
+        imgBitmap = await createImageBitmap(file);
+    } catch (e) {
+        log(`createImageBitmap FAILED: ${e.message}`);
+        throw e;
     }
 
-    self.postMessage({ type: 'progress', progress: 90, filename: 'Creating TAR...' });
-    const tarBuffer = createTar(tarEntries);
+    log(`Bitmap ready: ${imgBitmap.width}x${imgBitmap.height}. Creating canvas.`);
 
-    // Clear references to converted data as soon as TAR is built
-    tarEntries.length = 0;
+    if (typeof OffscreenCanvas === 'undefined') {
+        log("OffscreenCanvas is UNDEFINED");
+        throw new Error("OffscreenCanvas not supported in this browser version.");
+    }
 
-    self.postMessage({ type: 'progress', progress: 95, filename: 'Compressing Zstd...' });
-    const zstdBuffer = fzstd.compress(tarBuffer);
-
-    return new Blob([zstdBuffer], { type: 'application/zstd' });
-}
-
-async function convertToWebP(file) {
-    // createImageBitmap(file) is very efficient for Blobs/Files
-    const imgBitmap = await createImageBitmap(file);
     const canvas = new OffscreenCanvas(imgBitmap.width, imgBitmap.height);
     const ctx = canvas.getContext('2d');
     ctx.drawImage(imgBitmap, 0, 0);
 
-    // Convert to blob
-    const blob = await canvas.convertToBlob({ type: 'image/webp', quality: 0.8 });
+    log("convertToBlob start (image/webp)");
+    let blob;
+    try {
+        blob = await canvas.convertToBlob({ type: 'image/webp', quality: 0.8 });
+    } catch (e) {
+        log(`convertToBlob FAILED: ${e.message}`);
+        throw e;
+    }
 
-    // Explicitly close the bitmap to free graphics memory IMMEDIATELY
+    log(`Conversion successful: ${blob.size} bytes`);
     imgBitmap.close();
 
-    // Convert blob to Uint8Array for the TAR buffer
-    return new Uint8Array(await blob.arrayBuffer());
+    const arrayBuffer = await blob.arrayBuffer();
+    const webpName = file.name.replace(/\.[^/.]+$/, "") + ".webp";
+
+    return { name: webpName, data: new Uint8Array(arrayBuffer) };
 }
 
-// Minimal USTAR implementation
-function createTar(entries) {
-    const blockSize = 512;
-    let totalSize = 0;
+async function finalize() {
+    self.postMessage({ type: 'progress', progress: 85, filename: 'Building TAR archive...' });
 
-    entries.forEach(entry => {
-        totalSize += blockSize; // Header
-        totalSize += Math.ceil(entry.data.length / blockSize) * blockSize; // Data
+    let totalTarSize = 0;
+    fileMetadata.forEach(m => {
+        totalTarSize += 512;
+        totalTarSize += Math.ceil(m.size / 512) * 512;
     });
-    totalSize += blockSize * 2; // End of archive (two null blocks)
+    totalTarSize += 1024;
 
-    const buffer = new Uint8Array(totalSize);
+    log(`Total TAR size calculated: ${totalTarSize}`);
+    const tarBuffer = new Uint8Array(totalTarSize);
     let offset = 0;
 
-    entries.forEach(entry => {
-        const header = new Uint8Array(blockSize);
-        const nameEncoder = new TextEncoder();
+    for (let i = 0; i < fileMetadata.length; i++) {
+        const meta = fileMetadata[i];
+        const data = await getFromDB(i);
 
-        // Fill header according to USTAR format
-        const nameBytes = nameEncoder.encode(entry.name);
-        header.set(nameBytes.subarray(0, 99));
+        const header = createTarHeader(meta.name, data.length);
+        tarBuffer.set(header, offset);
+        offset += 512;
 
-        header.set(nameEncoder.encode("0000644\u0000"), 100);
-        header.set(nameEncoder.encode("0000000\u0000"), 108);
-        header.set(nameEncoder.encode("0000000\u0000"), 116);
+        tarBuffer.set(data, offset);
+        offset += Math.ceil(data.length / 512) * 512;
 
-        const sizeStr = entry.data.length.toString(8).padStart(11, '0') + "\u0000";
-        header.set(nameEncoder.encode(sizeStr), 124);
+        if (i % 50 === 0) {
+            self.postMessage({ type: 'progress', progress: 85 + (i / fileMetadata.length) * 5 });
+            await new Promise(r => setTimeout(r, 0));
+        }
+    }
 
-        const mtimeStr = Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + "\u0000";
-        header.set(nameEncoder.encode(mtimeStr), 136);
+    log("Compressing with fzstd...");
+    self.postMessage({ type: 'progress', progress: 95, filename: 'Zstd Compression...' });
 
-        header.set(nameEncoder.encode("        "), 148);
-        header[156] = 48; // '0' (Normal file)
+    try {
+        const compressed = fzstd.compress(tarBuffer);
+        log("Compression complete. Sending blob.");
+        self.postMessage({
+            type: 'done',
+            result: new Blob([compressed], { type: 'application/zstd' })
+        });
+    } catch (e) {
+        log(`Compression FAILED: ${e.message}`);
+        throw e;
+    }
+}
 
-        header.set(nameEncoder.encode("ustar\u0000"), 257);
-        header.set(nameEncoder.encode("00"), 263);
+function createTarHeader(name, size) {
+    const h = new Uint8Array(512);
+    const encoder = new TextEncoder();
+    h.set(encoder.encode(name).subarray(0, 99));
+    h.set(encoder.encode("0000644\u0000"), 100);
+    h.set(encoder.encode("0000000\u0000"), 108);
+    h.set(encoder.encode("0000000\u0000"), 116);
+    h.set(encoder.encode(size.toString(8).padStart(11, '0') + "\u0000"), 124);
+    h.set(encoder.encode(Math.floor(Date.now() / 1000).toString(8).padStart(11, '0') + "\u0000"), 136);
+    h.set(encoder.encode("        "), 148);
+    h[156] = 48; // '0'
+    h.set(encoder.encode("ustar\u0000"), 257);
+    h.set(encoder.encode("00"), 263);
 
-        // Sum up all bytes for checksum
-        let checksum = 0;
-        for (let i = 0; i < blockSize; i++) checksum += header[i];
-        const checksumStr = checksum.toString(8).padStart(6, '0') + "\u0000 ";
-        header.set(nameEncoder.encode(checksumStr), 148);
-
-        buffer.set(header, offset);
-        offset += blockSize;
-
-        buffer.set(entry.data, offset);
-        offset += Math.ceil(entry.data.length / blockSize) * blockSize;
-    });
-
-    return buffer;
+    let cksum = 0;
+    for (let i = 0; i < 512; i++) cksum += h[i];
+    h.set(encoder.encode(cksum.toString(8).padStart(6, '0') + "\u0000 "), 148);
+    return h;
 }

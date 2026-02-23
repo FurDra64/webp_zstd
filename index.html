@@ -16,7 +16,7 @@
         <header>
             <h1>WebP & Zstd</h1>
             <p>Convert images to WebP and package as .tar.zstd</p>
-            <p>v1.0.1</p>
+            <p>v1.0.2</p>
         </header>
 
         <main>
@@ -56,6 +56,14 @@
         <footer>
             <p>Static Page - Client-side processing only</p>
         </footer>
+    </div>
+
+    <div id="debug-console" class="debug-console hidden">
+        <div class="debug-header">
+            <span>Debug Log</span>
+            <button onclick="document.getElementById('debug-console').classList.add('hidden')">Close</button>
+        </div>
+        <div id="debug-log"></div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/fzstd@0.1.1/dist/index.min.js"></script>
