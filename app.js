@@ -30,13 +30,8 @@ function log(msg) {
 window.onerror = (msg, url, line) => log(`ERR: ${msg} (${line})`);
 window.onunhandledrejection = (e) => log(`REJECT: ${e.reason}`);
 
-// Create debug button
-const debugBtn = document.createElement('button');
-debugBtn.className = 'debug-btn';
-debugBtn.textContent = 'Debug';
-debugBtn.onclick = () => debugConsole.classList.toggle('hidden');
-document.body.appendChild(debugBtn);
-
+// Create debug toggle logic (now console is visible by default)
+debugConsole.classList.remove('hidden');
 log("App Initialized");
 checkFeatures();
 
