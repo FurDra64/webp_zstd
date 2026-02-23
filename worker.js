@@ -1,11 +1,21 @@
-/* Legacy-Compatible Worker Logic */
-self.postMessage({ type: 'log', msg: 'Worker top-level execution' });
-
+var zstd = null;
 try {
-    importScripts('https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.min.js');
-    self.postMessage({ type: 'log', msg: 'fzstd library loaded successfully' });
+    importScripts('https://cdn.jsdelivr.net/npm/@oneidentity/zstd-js@1.0.3/lib/index.umd.min.js');
+
+    var startInit = null;
+    if (typeof ZstdInit !== 'undefined') startInit = ZstdInit;
+    else if (typeof zstdCodec !== 'undefined' && zstdCodec.ZstdInit) startInit = zstdCodec.ZstdInit;
+
+    if (startInit) {
+        startInit().then(function (instance) {
+            zstd = instance;
+            log('zstd-js library loaded and initialized');
+        }).catch(function (err) {
+            log('zstd-js initialization failed: ' + err.message);
+        });
+    }
 } catch (e) {
-    self.postMessage({ type: 'log', msg: 'CRITICAL: fzstd load failed: ' + e.message });
+    self.postMessage({ type: 'log', msg: 'CRITICAL: zstd-js load failed: ' + e.message });
 }
 
 function log(msg) {
@@ -159,8 +169,20 @@ function finalize() {
     var processNextTar = function (idx) {
         if (idx >= fileMetadata.length) {
             log("Worker: Zstd compress start");
+            if (!zstd) {
+                log("Worker: Zstd Error - Library not ready");
+                self.postMessage({ type: 'error', error: 'Zstd library not ready' });
+                return;
+            }
             try {
-                var compressed = fzstd.compress(tarBuffer);
+                var compressed;
+                if (zstd.ZstdSimple && typeof zstd.ZstdSimple.compress === 'function') {
+                    compressed = zstd.ZstdSimple.compress(tarBuffer);
+                } else if (typeof zstd.compress === 'function') {
+                    compressed = zstd.compress(tarBuffer);
+                } else {
+                    throw new Error("Compression function not found in library instance.");
+                }
                 log("Worker: Zstd success " + compressed.length);
                 self.postMessage({ type: 'done', result: new Blob([compressed], { type: 'application/zstd' }) });
             } catch (e) {
@@ -181,14 +203,29 @@ function finalize() {
         }
     };
 
+    var nowOctal = Math.floor(Date.now() / 1000).toString(8);
+    while (nowOctal.length < 11) nowOctal = "0" + nowOctal;
+
     function writeToTar(data, meta, idx) {
         var h = new Uint8Array(512);
         var nameStr = meta.name;
+        // Name
         for (var j = 0; j < Math.min(nameStr.length, 99); j++) h[j] = nameStr.charCodeAt(j);
 
+        // Mode (0000644)
+        var mode = "0000644";
+        for (var j = 0; j < 7; j++) h[100 + j] = mode.charCodeAt(j);
+
+        // UID / GID (0000000)
+        for (var j = 0; j < 7; j++) { h[108 + j] = 48; h[116 + j] = 48; }
+
+        // Size
         var sizeStr = data.length.toString(8);
         while (sizeStr.length < 11) sizeStr = "0" + sizeStr;
         for (var j = 0; j < 11; j++) h[124 + j] = sizeStr.charCodeAt(j);
+
+        // Mtime
+        for (var j = 0; j < 11; j++) h[136 + j] = nowOctal.charCodeAt(j);
 
         h[156] = 48; // File type '0'
 

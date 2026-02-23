@@ -11,6 +11,23 @@
     var progressFill = document.getElementById('progress-fill');
     var statusText = document.getElementById('status-text');
     var debugLog = document.getElementById('debug-log');
+    var zstd = null;
+
+    function initZstd() {
+        var startInit = null;
+        if (typeof ZstdInit !== 'undefined') startInit = ZstdInit;
+        else if (typeof zstdCodec !== 'undefined' && zstdCodec.ZstdInit) startInit = zstdCodec.ZstdInit;
+
+        if (startInit) {
+            startInit().then(function (instance) {
+                zstd = instance;
+                log("Zstd Library ready.");
+            }).catch(function (err) {
+                log("Zstd Init Error: " + err.message);
+            });
+        }
+    }
+    initZstd();
 
     var filesArray = [];
     var currentFileIndex = 0;
@@ -97,9 +114,15 @@
             worker = new Worker('worker.js');
             worker.onerror = function (e) {
                 log("Worker Error: " + e.message);
+                if (window.location.protocol === 'file:') {
+                    log("TIP: Workers often fail on file:// protocol. Use a local server.");
+                }
             };
         } catch (e) {
             log("Worker Creation failed: " + e.message);
+            if (window.location.protocol === 'file:') {
+                log("NOTE: Browser security blocks Workers on file://. Falling back to Main Thread.");
+            }
             startMainThreadMode();
             return;
         }
@@ -195,13 +218,26 @@
 
         var buffer = new Uint8Array(totalSize);
         var offset = 0;
+        var nowOctal = Math.floor(Date.now() / 1000).toString(8);
+        while (nowOctal.length < 11) nowOctal = "0" + nowOctal;
+
         for (var i = 0; i < entries.length; i++) {
             var ent = entries[i];
             var h = new Uint8Array(512);
+            // Name
             for (var j = 0; j < Math.min(ent.name.length, 99); j++) h[j] = ent.name.charCodeAt(j);
+            // Mode (0000644)
+            var mode = "0000644";
+            for (var j = 0; j < 7; j++) h[100 + j] = mode.charCodeAt(j);
+            // UID / GID (0000000)
+            for (var j = 0; j < 7; j++) { h[108 + j] = 48; h[116 + j] = 48; }
+            // Size
             var sz = ent.data.length.toString(8);
             while (sz.length < 11) sz = "0" + sz;
             for (var j = 0; j < 11; j++) h[124 + j] = sz.charCodeAt(j);
+            // Mtime
+            for (var j = 0; j < 11; j++) h[136 + j] = nowOctal.charCodeAt(j);
+
             h[156] = 48; // File type 0
 
             // Magic
@@ -218,8 +254,20 @@
         }
 
         log("Main: Zstd Compress start...");
+        if (!zstd) {
+            log("Main: Compress Error: Zstd library not initialized yet.");
+            convertBtn.disabled = false;
+            return;
+        }
         try {
-            var compressed = fzstd.compress(buffer);
+            var compressed;
+            if (zstd.ZstdSimple && typeof zstd.ZstdSimple.compress === 'function') {
+                compressed = zstd.ZstdSimple.compress(buffer);
+            } else if (typeof zstd.compress === 'function') {
+                compressed = zstd.compress(buffer);
+            } else {
+                throw new Error("Compression function not found in library instance.");
+            }
             log("Main: Compress done (" + compressed.length + " bytes)");
             finish(new Blob([compressed], { type: 'application/zstd' }));
         } catch (e) {
